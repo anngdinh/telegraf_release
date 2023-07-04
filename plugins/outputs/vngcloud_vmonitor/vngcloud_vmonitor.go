@@ -29,19 +29,17 @@ import (
 )
 
 const (
-	metricPath           = "/intake/v2/series"
-	quotaPath            = "/intake/v2/check"
-	defaultClientTimeout = 10 * time.Second
-	defaultContentType   = "application/json"
-	AgentVersion         = "1.26.0-2.0.0"
+	metricPath         = "/intake/v2/series"
+	quotaPath          = "/intake/v2/check"
+	defaultContentType = "application/json"
+	agentVersion       = "1.26.0-2.0.0"
 )
 
 var defaultConfig = &VNGCloudvMonitor{
 	URL:             "http://localhost:8081",
 	Timeout:         config.Duration(10 * time.Second),
-	Method:          http.MethodPost,
 	IamURL:          "https://hcm-3.console.vngcloud.vn/iam/accounts-api/v2/auth/token",
-	CheckQuotaRetry: config.Duration(30 * time.Second),
+	checkQuotaRetry: config.Duration(30 * time.Second),
 }
 
 var sampleConfig = `
@@ -55,13 +53,6 @@ var sampleConfig = `
   client_id = ""
   client_secret = ""
 `
-
-type Request struct {
-	Method string
-	Url    string
-	Path   string
-	Body   []byte
-}
 
 type Plugin struct {
 	Name    string `json:"name"`
@@ -88,30 +79,29 @@ type infoHost struct {
 	ModelNameCPU string `json:"model_name_cpu"`
 	Mem          uint64 `json:"mem"`
 	Ip           string `json:"ip"`
-	AgentVersion string `json:"agent_version"`
+	agentVersion string
 	UserAgent    string `toml:"user_agent"`
+}
+
+type VMonitorConfig struct {
 }
 
 type VNGCloudvMonitor struct {
 	URL             string            `toml:"url"`
 	Timeout         config.Duration   `toml:"timeout"`
-	Method          string            `toml:"method"`
 	Headers         map[string]string `toml:"headers"`
 	ContentEncoding string            `toml:"content_encoding"`
-	Insecure        bool              `toml:"insecure_skip_verify"`
 	ProxyStr        string            `toml:"proxy_url"`
 
 	IamURL       string `toml:"iam_url"`
 	ClientId     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
 
-	Requests           *Request
-	serializer         serializers.Serializer
-	infoHost           *infoHost
-	client_iam         *http.Client
-	Oauth2ClientConfig *clientcredentials.Config
+	serializer serializers.Serializer
+	infoHost   *infoHost
+	client_iam *http.Client
 
-	CheckQuotaRetry config.Duration
+	checkQuotaRetry config.Duration
 
 	dropCount int
 	retryTime int
@@ -127,13 +117,13 @@ func (h *VNGCloudvMonitor) SetSerializer(serializer serializers.Serializer) {
 
 func (h *VNGCloudvMonitor) initHTTPClient() error {
 	log.Println("[vMonitor] Init client-iam ...")
-	h.Oauth2ClientConfig = &clientcredentials.Config{
+	Oauth2ClientConfig := &clientcredentials.Config{
 		ClientID:     h.ClientId,
 		ClientSecret: h.ClientSecret,
 		TokenURL:     h.IamURL,
 	}
 
-	token, err := h.Oauth2ClientConfig.TokenSource(context.Background()).Token()
+	token, err := Oauth2ClientConfig.TokenSource(context.Background()).Token()
 	if err != nil {
 		h.dropMode = true
 		return fmt.Errorf("[vMonitor] Failed to get token: %s", err.Error())
@@ -144,7 +134,7 @@ func (h *VNGCloudvMonitor) initHTTPClient() error {
 		h.dropMode = true
 		return fmt.Errorf("[vMonitor] Failed to Marshal token: %s", err.Error())
 	}
-	h.client_iam = h.Oauth2ClientConfig.Client(context.TODO())
+	h.client_iam = Oauth2ClientConfig.Client(context.TODO())
 	log.Println("[vMonitor] Init client-iam successfully")
 	h.dropMode = false
 	return nil
@@ -200,9 +190,6 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[vMonitor] err getting ip address %s", err.Error())
 	}
-	if err != nil {
-		return nil, fmt.Errorf("[vMonitor] err getting mac_address %s", err.Error())
-	}
 	// get ip local
 
 	gi, err := goInfo.GetInfo()
@@ -235,26 +222,10 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	h.infoHost.ModelNameCPU = modelNameCPU
 	h.infoHost.Mem = vm.Total
 	h.infoHost.Ip = ipLocal
-	h.infoHost.AgentVersion = AgentVersion
-	h.infoHost.UserAgent = fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", AgentVersion, h.infoHost.OS)
+	h.infoHost.agentVersion = agentVersion
+	h.infoHost.UserAgent = fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", agentVersion, h.infoHost.OS)
 
 	return h.infoHost, nil
-}
-
-func (h *VNGCloudvMonitor) setDefault() error {
-	if h.Method == "" {
-		h.Method = http.MethodPost
-	}
-
-	h.Method = strings.ToUpper(h.Method)
-	if h.Method != http.MethodPost && h.Method != http.MethodPut {
-		return fmt.Errorf("[vMonitor] Invalid method [%s] %s", h.URL, h.Method)
-	}
-
-	if h.Timeout == 0 {
-		h.Timeout = config.Duration(defaultClientTimeout)
-	}
-	return nil
 }
 
 func isUrl(str string) bool {
@@ -273,10 +244,6 @@ func (h *VNGCloudvMonitor) CheckConfig() error {
 func (h *VNGCloudvMonitor) Connect() error {
 
 	if err := h.CheckConfig(); err != nil {
-		return err
-	}
-
-	if err := h.setDefault(); err != nil {
 		return err
 	}
 
@@ -398,7 +365,7 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 		reqBodyBuffer = rc
 	}
 
-	req, err := http.NewRequest(h.Method, fmt.Sprintf("%s%s", h.URL, metricPath), reqBodyBuffer)
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%s", h.URL, metricPath), reqBodyBuffer)
 	if err != nil {
 		return err
 	}
@@ -452,29 +419,18 @@ func (h *VNGCloudvMonitor) handleResponse(respCode int, dataRsp []byte) error {
 	switch respCode {
 	case 201:
 		return nil
-	case 400:
-		return fmt.Errorf("[vMonitor] Bad request")
 	case 401:
 		h.setDropMode(true)
-		return fmt.Errorf("[vMonitor] IAM Unauthorized")
 	case 403:
 		h.setDropMode(true)
-		return fmt.Errorf("[vMonitor] IAM Forbidden")
 	case 428:
 		if err := h.checkQuota(); err != nil {
 			return err
 		}
-		return fmt.Errorf("[vMonitor] Checking quota success, try to send metric again")
 	case 409:
 		h.doubleCheckTime()
-		return fmt.Errorf("[vMonitor] Drop this point because of (%d - %s)", respCode, dataRsp)
-	case 503, 504:
-		return fmt.Errorf("[vMonitor] Gateway Timeout or Service Unavailable (%d)", respCode)
-	case 408:
-		return fmt.Errorf("[vMonitor] Request Time-out (%d)", respCode)
-	default:
-		return fmt.Errorf("[vMonitor] Unhandled Status Code %d", respCode)
 	}
+	return fmt.Errorf("[vMonitor] Status Code: %d, message: %s", respCode, dataRsp)
 }
 
 func (h *VNGCloudvMonitor) checkQuota() error {
@@ -517,22 +473,16 @@ func (h *VNGCloudvMonitor) checkQuota() error {
 		h.dropTime = time.Now()
 		h.checkQuotaFirst = false
 		return nil
-	case 400:
-		return fmt.Errorf("[vMonitor] Bad request")
+
 	case 401:
 		h.setDropMode(true)
-		return fmt.Errorf("[vMonitor] IAM Unauthorized")
 	case 403:
 		h.setDropMode(true)
-		return fmt.Errorf("[vMonitor] IAM Forbidden")
 	case 409:
 		h.doubleCheckTime()
-		return fmt.Errorf("[vMonitor] Conflict - %s", dataRsp)
-	case 503, 504:
-		return fmt.Errorf("[vMonitor] Gateway Timeout or Service Unavailable")
-	default:
-		return fmt.Errorf("[vMonitor] Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
+
 	}
+	return fmt.Errorf("[vMonitor] Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
 }
 
 func init() {
@@ -551,10 +501,9 @@ func init() {
 		log.Print("#################### Welcome to vMonitor (VNGCLOUD) ####################")
 		return &VNGCloudvMonitor{
 			Timeout:         defaultConfig.Timeout,
-			Method:          defaultConfig.Method,
 			URL:             defaultConfig.URL,
 			IamURL:          defaultConfig.IamURL,
-			CheckQuotaRetry: defaultConfig.CheckQuotaRetry,
+			checkQuotaRetry: defaultConfig.checkQuotaRetry,
 			infoHost:        infoHosts,
 
 			dropCount: 0,
@@ -574,7 +523,7 @@ func (h *VNGCloudvMonitor) doubleCheckTime() {
 	} else {
 		h.dropCount = 1
 	}
-	dropDuration := time.Duration(int(math.Pow(2, float64(h.dropCount))) * int(h.CheckQuotaRetry))
+	dropDuration := time.Duration(int(math.Pow(2, float64(h.dropCount))) * int(h.checkQuotaRetry))
 	h.dropTime = time.Now().Add(dropDuration)
 }
 

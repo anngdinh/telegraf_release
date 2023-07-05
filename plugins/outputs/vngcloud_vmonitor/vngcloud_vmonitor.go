@@ -20,11 +20,13 @@ import (
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/config"
 	"github.com/influxdata/telegraf/internal"
+	"github.com/influxdata/telegraf/plugins/common/proxy"
 	"github.com/influxdata/telegraf/plugins/inputs/system"
 	"github.com/influxdata/telegraf/plugins/outputs"
 	"github.com/influxdata/telegraf/plugins/serializers"
 	"github.com/matishsiao/goInfo"
 	"github.com/shirou/gopsutil/cpu"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 )
 
@@ -66,7 +68,8 @@ type QuotaInfo struct {
 }
 
 type infoHost struct {
-	Plugins []*Plugin `json:"plugins"`
+	Plugins     []Plugin `json:"plugins"`
+	PluginsList map[string]bool
 
 	HashID string `json:"hash_id"`
 
@@ -79,19 +82,17 @@ type infoHost struct {
 	ModelNameCPU string `json:"model_name_cpu"`
 	Mem          uint64 `json:"mem"`
 	Ip           string `json:"ip"`
-	agentVersion string
+	AgentVersion string `json:"agent_version"`
 	UserAgent    string `toml:"user_agent"`
 }
 
-type VMonitorConfig struct {
-}
-
 type VNGCloudvMonitor struct {
-	URL             string            `toml:"url"`
-	Timeout         config.Duration   `toml:"timeout"`
-	Headers         map[string]string `toml:"headers"`
-	ContentEncoding string            `toml:"content_encoding"`
-	ProxyStr        string            `toml:"proxy_url"`
+	URL             string          `toml:"url"`
+	Timeout         config.Duration `toml:"timeout"`
+	ContentEncoding string          `toml:"content_encoding"`
+	Insecure        bool            `toml:"insecure_skip_verify"`
+	proxy.HTTPProxy
+	Log telegraf.Logger `toml:"-"`
 
 	IamURL       string `toml:"iam_url"`
 	ClientId     string `toml:"client_id"`
@@ -116,14 +117,23 @@ func (h *VNGCloudvMonitor) SetSerializer(serializer serializers.Serializer) {
 }
 
 func (h *VNGCloudvMonitor) initHTTPClient() error {
-	log.Println("[vMonitor] Init client-iam ...")
+	h.Log.Info("[vMonitor] Init client-iam ...")
 	Oauth2ClientConfig := &clientcredentials.Config{
 		ClientID:     h.ClientId,
 		ClientSecret: h.ClientSecret,
 		TokenURL:     h.IamURL,
 	}
-
-	token, err := Oauth2ClientConfig.TokenSource(context.Background()).Token()
+	proxyFunc, err := h.Proxy()
+	if err != nil {
+		return err
+	}
+	ctx := context.WithValue(context.TODO(), oauth2.HTTPClient, &http.Client{
+		Transport: &http.Transport{
+			Proxy: proxyFunc,
+		},
+		Timeout: time.Duration(h.Timeout),
+	})
+	token, err := Oauth2ClientConfig.TokenSource(ctx).Token()
 	if err != nil {
 		h.dropMode = true
 		return fmt.Errorf("[vMonitor] Failed to get token: %s", err.Error())
@@ -134,8 +144,8 @@ func (h *VNGCloudvMonitor) initHTTPClient() error {
 		h.dropMode = true
 		return fmt.Errorf("[vMonitor] Failed to Marshal token: %s", err.Error())
 	}
-	h.client_iam = Oauth2ClientConfig.Client(context.TODO())
-	log.Println("[vMonitor] Init client-iam successfully")
+	h.client_iam = Oauth2ClientConfig.Client(ctx)
+	h.Log.Info("[vMonitor] Init client-iam successfully")
 	h.dropMode = false
 	return nil
 }
@@ -162,7 +172,7 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	getHostPort := func(urlStr string) (string, error) {
 		u, err := url.Parse(urlStr)
 		if err != nil {
-			return "", fmt.Errorf("[vMonitor] proxy invalid %s", h.ProxyStr)
+			return "", fmt.Errorf("[vMonitor] url invalid %s", urlStr)
 		}
 
 		host, port, err := net.SplitHostPort(u.Host)
@@ -181,11 +191,8 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	var ipLocal string
 	var err error
 	// get ip local
-	if h.ProxyStr != "" {
-		ipLocal, err = getHostPort(h.ProxyStr)
-	} else {
-		ipLocal, err = getHostPort(h.URL)
-	}
+
+	ipLocal, err = getHostPort(h.URL)
 
 	if err != nil {
 		return nil, fmt.Errorf("[vMonitor] err getting ip address %s", err.Error())
@@ -213,18 +220,22 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 		return nil, fmt.Errorf("[vMonitor] error getting cpu model name: %s", err)
 	}
 
-	h.infoHost.HashID = hashedID
-	h.infoHost.Kernel = gi.Kernel
-	h.infoHost.Core = gi.Core
-	h.infoHost.Platform = gi.Platform
-	h.infoHost.OS = gi.OS
-	h.infoHost.CPUs = gi.CPUs
-	h.infoHost.ModelNameCPU = modelNameCPU
-	h.infoHost.Mem = vm.Total
-	h.infoHost.Ip = ipLocal
-	h.infoHost.agentVersion = agentVersion
-	h.infoHost.UserAgent = fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", agentVersion, h.infoHost.OS)
-
+	h.infoHost = &infoHost{
+		Plugins:      []Plugin{},
+		PluginsList:  make(map[string]bool),
+		Hostname:     gi.Hostname,
+		HashID:       hashedID,
+		Kernel:       gi.Kernel,
+		Core:         gi.Core,
+		Platform:     gi.Platform,
+		OS:           gi.OS,
+		CPUs:         gi.CPUs,
+		ModelNameCPU: modelNameCPU,
+		Mem:          vm.Total,
+		Ip:           ipLocal,
+		AgentVersion: agentVersion,
+		UserAgent:    fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", agentVersion, gi.OS),
+	}
 	return h.infoHost, nil
 }
 
@@ -276,49 +287,33 @@ func (h *VNGCloudvMonitor) SampleConfig() string {
 }
 
 func (h *VNGCloudvMonitor) setPlugins(metrics []telegraf.Metric) error {
-	a := h.infoHost.Plugins
-	nameTemp := ""
 	hostname := ""
+	for _, metric := range metrics {
+		if _, exists := h.infoHost.PluginsList[metric.Name()]; !exists {
+			hostTemp, ok := metric.GetTag("host")
 
-	existCheck := func(name string) bool {
-		for _, e := range a {
-			if name == e.Name {
-				return true
+			if ok {
+				hostname = hostTemp
 			}
-		}
-		return false
-	}
-	for _, element := range metrics {
-		if element.Name() != nameTemp || nameTemp == "" {
-			if !existCheck(element.Name()) {
-				hostTemp, ok := element.GetTag("host")
 
-				if ok {
-					hostname = hostTemp
-				}
-
-				msg := "running"
-				a = append(a, &Plugin{
-					Name:    element.Name(),
-					Status:  0,
-					Message: msg,
-				})
-				nameTemp = element.Name()
-			}
+			msg := "running"
+			h.infoHost.Plugins = append(h.infoHost.Plugins, Plugin{
+				Name:    metric.Name(),
+				Status:  0,
+				Message: msg,
+			})
+			h.infoHost.PluginsList[metric.Name()] = true
 		}
 	}
-
-	if hostname == "" && h.infoHost.Hostname == "" {
+	if hostname != "" {
+		h.infoHost.Hostname = hostname
+	} else if h.infoHost.Hostname == "" {
 		hostnameTemp, err := os.Hostname()
 		if err != nil {
 			return err
 		}
 		h.infoHost.Hostname = hostnameTemp
 	}
-	if hostname != "" {
-		h.infoHost.Hostname = hostname
-	}
-	h.infoHost.Plugins = a
 	return nil
 }
 
@@ -333,8 +328,12 @@ func (h *VNGCloudvMonitor) Write(metrics []telegraf.Metric) error {
 	}
 
 	if h.checkQuotaFirst {
-		err := h.checkQuota()
+		isDrop, err := h.checkQuota()
 		if err != nil {
+			if isDrop {
+				h.Log.Warnf("[vMonitor] Drop metrics")
+				return nil
+			}
 			return err
 		}
 	}
@@ -377,17 +376,10 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 	if h.ContentEncoding == "gzip" {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
-	for k, v := range h.Headers {
-		if strings.ToLower(k) == "host" {
-			req.Host = v
-		}
-		req.Header.Set(k, v)
-	}
 
 	resp, err := h.client_iam.Do(req)
 	if err != nil {
-		er := h.initHTTPClient()
-		if er != nil {
+		if er := h.initHTTPClient(); er != nil {
 			log.Printf("[vMonitor] Drop metrics because can't init IAM: %s", er.Error())
 			return nil
 		}
@@ -402,38 +394,37 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 
 	log.Printf("[vMonitor] Request-ID: %s with body length %d byte and response body %s", resp.Header.Get("Api-Request-ID"), len(reqBody), dataRsp)
 
-	if err := h.handleResponse(resp.StatusCode, dataRsp); err != nil {
-		if h.dropMode {
-			log.Printf("[vMonitor] Drop metrics because of %s", err.Error())
+	if isDrop, err := h.handleResponse(resp.StatusCode, dataRsp); err != nil {
+		if isDrop {
+			h.Log.Warnf("[vMonitor] Drop metrics because of %s", err.Error())
 			return nil
 		}
 		return err
 	}
-
 	return nil
 }
 
-func (h *VNGCloudvMonitor) handleResponse(respCode int, dataRsp []byte) error {
-	h.setDropMode(false)
+func (h *VNGCloudvMonitor) handleResponse(respCode int, dataRsp []byte) (bool, error) {
 
 	switch respCode {
 	case 201:
-		return nil
+		return false, nil
 	case 401:
-		h.setDropMode(true)
+		return true, fmt.Errorf("[vMonitor] IAM Unauthorized. Please check your service account")
 	case 403:
-		h.setDropMode(true)
+		return true, fmt.Errorf("[vMonitor] IAM Forbidden. Please check your permission")
 	case 428:
-		if err := h.checkQuota(); err != nil {
-			return err
+		if isDrop, err := h.checkQuota(); err != nil {
+			return isDrop, fmt.Errorf("[vMonitor] Can not check quota: %s", err.Error())
 		}
 	case 409:
 		h.doubleCheckTime()
+		return true, fmt.Errorf("[vMonitor] Conflict. Please check your quota again")
 	}
-	return fmt.Errorf("[vMonitor] Status Code: %d, message: %s", respCode, dataRsp)
+	return false, fmt.Errorf("[vMonitor] Status Code: %d, message: %s", respCode, dataRsp)
 }
 
-func (h *VNGCloudvMonitor) checkQuota() error {
+func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
 	log.Printf("[vMonitor] Start check quota ...")
 	h.checkQuotaFirst = true
 
@@ -443,12 +434,12 @@ func (h *VNGCloudvMonitor) checkQuota() error {
 	}
 	quotaJson, err := json.Marshal(quotaStruct)
 	if err != nil {
-		return fmt.Errorf("[vMonitor] Can not marshal quota struct: %s", err.Error())
+		return false, fmt.Errorf("[vMonitor] Can not marshal quota struct: %s", err.Error())
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%s", h.URL, quotaPath), bytes.NewBuffer(quotaJson))
 	if err != nil {
-		return fmt.Errorf("[vMonitor] Error create new request: %s", err.Error())
+		return false, fmt.Errorf("[vMonitor] Error create new request: %s", err.Error())
 	}
 	req.Header.Set("checksum", h.infoHost.HashID)
 	req.Header.Set("Content-Type", defaultContentType)
@@ -456,47 +447,50 @@ func (h *VNGCloudvMonitor) checkQuota() error {
 	resp, err := h.client_iam.Do(req)
 
 	if err != nil {
-		return fmt.Errorf("[vMonitor] Send request checking quota failed: (%s)", err.Error())
+		return false, fmt.Errorf("[vMonitor] Send request checking quota failed: (%s)", err.Error())
 	}
 	defer resp.Body.Close()
 	dataRsp, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		return fmt.Errorf("[vMonitor] Error occurred when reading response body: (%s)", err.Error())
+		return false, fmt.Errorf("[vMonitor] Error occurred when reading response body: (%s)", err.Error())
 	}
 
+	isDrop := false
 	// handle check quota
 	switch resp.StatusCode {
 	case 200:
-		log.Printf("[vMonitor] Request-ID: %s. Checking quota success. Continue send metric.", resp.Header.Get("Api-Request-ID"))
+		h.Log.Infof("[vMonitor] Request-ID: %s. Checking quota success. Continue send metric.", resp.Header.Get("Api-Request-ID"))
 		h.dropCount = 0
 		h.dropTime = time.Now()
 		h.checkQuotaFirst = false
-		return nil
+		return false, nil
 
-	case 401:
-		h.setDropMode(true)
-	case 403:
-		h.setDropMode(true)
+	case 401, 403:
+		isDrop = true
 	case 409:
+		isDrop = true
 		h.doubleCheckTime()
-
 	}
-	return fmt.Errorf("[vMonitor] Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
+	return isDrop, fmt.Errorf("[vMonitor] Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
 }
 
 func init() {
 	outputs.Add("vngcloud_vmonitor", func() telegraf.Output {
 		infoHosts := &infoHost{
-			Plugins:  []*Plugin{},
-			HashID:   "",
-			Kernel:   "",
-			Core:     "",
-			Platform: "",
-			OS:       "",
-			Hostname: "",
-			CPUs:     0,
-			Mem:      0,
+			// Plugins: map[string]*Plugin{
+			// 	"haha": nil,
+			// },
+			Plugins:     []Plugin{},
+			PluginsList: make(map[string]bool),
+			HashID:      "",
+			Kernel:      "",
+			Core:        "",
+			Platform:    "",
+			OS:          "",
+			Hostname:    "",
+			CPUs:        0,
+			Mem:         0,
 		}
 		log.Print("#################### Welcome to vMonitor (VNGCLOUD) ####################")
 		return &VNGCloudvMonitor{
@@ -511,13 +505,12 @@ func init() {
 			dropTime:  time.Now(),
 
 			dropMode:        false,
-			checkQuotaFirst: true,
+			checkQuotaFirst: false,
 		}
 	})
 }
 
 func (h *VNGCloudvMonitor) doubleCheckTime() {
-	h.setDropMode(true)
 	if h.dropCount < h.retryTime {
 		h.dropCount++
 	} else {
@@ -525,11 +518,4 @@ func (h *VNGCloudvMonitor) doubleCheckTime() {
 	}
 	dropDuration := time.Duration(int(math.Pow(2, float64(h.dropCount))) * int(h.checkQuotaRetry))
 	h.dropTime = time.Now().Add(dropDuration)
-}
-
-func (h *VNGCloudvMonitor) setDropMode(mode bool) {
-	h.dropMode = mode
-	// if !mode {
-	// 	h.dropCount = 0
-	// }
 }

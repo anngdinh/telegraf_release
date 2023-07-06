@@ -138,7 +138,7 @@ func isValidDimensionsValue(name string, table Table) bool {
 
 	for _, r := range name {
 		if unicode.In(r, table.DimensionValues) {
-			log.Printf("[vMonitor] Valid str: %s", name)
+			log.Printf("[serials.vngcloud_vmonitor] Valid str: %s", name)
 			return false
 		}
 	}
@@ -148,7 +148,7 @@ func isValidDimensionsValue(name string, table Table) bool {
 
 func sanitize(name string, table Table) (string, bool) {
 	if len(name) > MaxCharMetricName || len(name) < MinCharMetricName {
-		log.Printf("[vMonitor] Metric or Dimension name higher than max character length (%d): %s", len(name), name)
+		log.Printf("[serials.vngcloud_vmonitor] Metric or Dimension name higher than max character length (%d): %s", len(name), name)
 		return name, false
 	}
 
@@ -184,7 +184,7 @@ func sanitize(name string, table Table) (string, bool) {
 func sanitizeWhitelistString(name string, table Table) (string, bool) {
 
 	if len(name) > MaxCharDmsValue || len(name) < MinCharDmsValue {
-		log.Printf("[vMonitor] Dimension value higher than max character length (%d): %s", len(name), name)
+		log.Printf("[serials.vngcloud_vmonitor] Dimension value higher than max character length (%d): %s", len(name), name)
 		return name, false
 	}
 
@@ -213,7 +213,7 @@ func sanitizeWhitelistString(name string, table Table) (string, bool) {
 func sanitizeString(name string, table Table) (string, bool) {
 
 	if len(name) > MaxCharDmsValue || len(name) < MinCharDmsValue {
-		log.Printf("[vMonitor] Valid max(%d): %s", len(name), name)
+		log.Printf("[serials.vngcloud_vmonitor] Valid max(%d): %s", len(name), name)
 		return name, false
 	}
 
@@ -305,7 +305,7 @@ func (s *serializer) SerializeBatch(metrics []telegraf.Metric) ([]byte, error) {
 	if err != nil {
 		return []byte{}, err
 	}
-	log.Printf("[vMonitor] Serialized batch %d metrics to %d objects", len(metrics), len(objects))
+	log.Printf("[serials.vngcloud_vmonitor] Serialized batch %d metrics to %d objects", len(metrics), len(objects))
 	return serialized, nil
 }
 
@@ -317,7 +317,7 @@ func (s *serializer) SerializeBatch(metrics []telegraf.Metric) ([]byte, error) {
 func (s *serializer) convertValueToFloat(v interface{}, name string) (float64, bool) {
 
 	invalidLog := func() {
-		log.Printf("[vMonitor] Metric_value invalid with value: %s -> %v(%T)", name, v, v)
+		log.Printf("[serials.vngcloud_vmonitor] Metric_value invalid with value: %s -> %v(%T)", name, v, v)
 	}
 
 	switch fv := v.(type) {

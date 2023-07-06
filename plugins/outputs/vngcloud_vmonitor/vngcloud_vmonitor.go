@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -35,6 +34,7 @@ const (
 	quotaPath          = "/intake/v2/check"
 	defaultContentType = "application/json"
 	agentVersion       = "1.26.0-2.0.0"
+	retryTime          = 128 // = 2^7 => retry max 128*30s
 )
 
 var defaultConfig = &VNGCloudvMonitor{
@@ -68,8 +68,8 @@ type QuotaInfo struct {
 }
 
 type infoHost struct {
-	Plugins     []Plugin `json:"plugins"`
-	PluginsList map[string]bool
+	Plugins     []Plugin        `json:"plugins"`
+	PluginsList map[string]bool `json:"-"`
 
 	HashID string `json:"hash_id"`
 
@@ -103,12 +103,8 @@ type VNGCloudvMonitor struct {
 	client_iam *http.Client
 
 	checkQuotaRetry config.Duration
-
-	dropCount int
-	retryTime int
-	dropTime  time.Time
-
-	dropMode        bool
+	dropCount       int
+	dropTime        time.Time
 	checkQuotaFirst bool
 }
 
@@ -117,7 +113,7 @@ func (h *VNGCloudvMonitor) SetSerializer(serializer serializers.Serializer) {
 }
 
 func (h *VNGCloudvMonitor) initHTTPClient() error {
-	h.Log.Info("[vMonitor] Init client-iam ...")
+	h.Log.Debug("Init client-iam ...")
 	Oauth2ClientConfig := &clientcredentials.Config{
 		ClientID:     h.ClientId,
 		ClientSecret: h.ClientSecret,
@@ -135,23 +131,20 @@ func (h *VNGCloudvMonitor) initHTTPClient() error {
 	})
 	token, err := Oauth2ClientConfig.TokenSource(ctx).Token()
 	if err != nil {
-		h.dropMode = true
-		return fmt.Errorf("[vMonitor] Failed to get token: %s", err.Error())
+		return fmt.Errorf("failed to get token: %s", err.Error())
 	}
 
 	_, err = json.Marshal(token)
 	if err != nil {
-		h.dropMode = true
-		return fmt.Errorf("[vMonitor] Failed to Marshal token: %s", err.Error())
+		return fmt.Errorf("failed to Marshal token: %s", err.Error())
 	}
 	h.client_iam = Oauth2ClientConfig.Client(ctx)
-	h.Log.Info("[vMonitor] Init client-iam successfully")
-	h.dropMode = false
+	h.Log.Info("Init client-iam successfully !")
 	return nil
 }
 
-func getIp(address, port string) (string, error) {
-	log.Printf("[vMonitor] Dial %s %s", address, port)
+func (h *VNGCloudvMonitor) getIp(address, port string) (string, error) {
+	h.Log.Infof("Dial %s %s", address, port)
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(address, port), 5*time.Second)
 	if err != nil {
 		return "", err
@@ -172,7 +165,7 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	getHostPort := func(urlStr string) (string, error) {
 		u, err := url.Parse(urlStr)
 		if err != nil {
-			return "", fmt.Errorf("[vMonitor] url invalid %s", urlStr)
+			return "", fmt.Errorf("url invalid %s", urlStr)
 		}
 
 		host, port, err := net.SplitHostPort(u.Host)
@@ -181,7 +174,7 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 			return "", err
 		}
 
-		ipLocal, err := getIp(host, port)
+		ipLocal, err := h.getIp(host, port)
 		if err != nil {
 			return "", err
 		}
@@ -195,13 +188,13 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	ipLocal, err = getHostPort(h.URL)
 
 	if err != nil {
-		return nil, fmt.Errorf("[vMonitor] err getting ip address %s", err.Error())
+		return nil, fmt.Errorf("err getting ip address %s", err.Error())
 	}
 	// get ip local
 
 	gi, err := goInfo.GetInfo()
 	if err != nil {
-		return nil, fmt.Errorf("[vMonitor] error getting os info: %s", err)
+		return nil, fmt.Errorf("error getting os info: %s", err)
 	}
 	ps := system.NewSystemPS()
 	vm, err := ps.VMStat()
@@ -211,13 +204,13 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	hashedID := hex.EncodeToString(hashCode.Sum(nil))
 
 	if err != nil {
-		return nil, fmt.Errorf("[vMonitor] error getting virtual memory info: %s", err)
+		return nil, fmt.Errorf("error getting virtual memory info: %s", err)
 	}
 
 	modelNameCPU, err := getModelNameCPU()
 
 	if err != nil {
-		return nil, fmt.Errorf("[vMonitor] error getting cpu model name: %s", err)
+		return nil, fmt.Errorf("error getting cpu model name: %s", err)
 	}
 
 	h.infoHost = &infoHost{
@@ -247,7 +240,7 @@ func isUrl(str string) bool {
 func (h *VNGCloudvMonitor) CheckConfig() error {
 	ok := isUrl(h.URL)
 	if !ok {
-		return fmt.Errorf("[vMonitor] URL Invalid %s", h.URL)
+		return fmt.Errorf("URL Invalid %s", h.URL)
 	}
 	return nil
 }
@@ -318,8 +311,8 @@ func (h *VNGCloudvMonitor) setPlugins(metrics []telegraf.Metric) error {
 }
 
 func (h *VNGCloudvMonitor) Write(metrics []telegraf.Metric) error {
-	if h.dropCount > 0 && time.Now().Before(h.dropTime) {
-		log.Printf("[vMonitor] Drop %d metrics. Send request again at %s", len(metrics), h.dropTime.Format("15:04:05"))
+	if h.dropCount > 1 && time.Now().Before(h.dropTime) {
+		h.Log.Warnf("Drop %d metrics. Send request again at %s", len(metrics), h.dropTime.Format("15:04:05"))
 		return nil
 	}
 
@@ -328,10 +321,9 @@ func (h *VNGCloudvMonitor) Write(metrics []telegraf.Metric) error {
 	}
 
 	if h.checkQuotaFirst {
-		isDrop, err := h.checkQuota()
-		if err != nil {
+		if isDrop, err := h.checkQuota(); err != nil {
 			if isDrop {
-				h.Log.Warnf("[vMonitor] Drop metrics")
+				h.Log.Warnf("Drop metrics because of %s", err.Error())
 				return nil
 			}
 			return err
@@ -380,10 +372,10 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 	resp, err := h.client_iam.Do(req)
 	if err != nil {
 		if er := h.initHTTPClient(); er != nil {
-			log.Printf("[vMonitor] Drop metrics because can't init IAM: %s", er.Error())
+			h.Log.Warnf("Drop metrics because can't init IAM: %s", er.Error())
 			return nil
 		}
-		return fmt.Errorf("[vMonitor] IAM request fail: %s", err.Error())
+		return fmt.Errorf("IAM request fail: %s", err.Error())
 	}
 	defer resp.Body.Close()
 	dataRsp, err := io.ReadAll(resp.Body)
@@ -392,11 +384,11 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 		return err
 	}
 
-	log.Printf("[vMonitor] Request-ID: %s with body length %d byte and response body %s", resp.Header.Get("Api-Request-ID"), len(reqBody), dataRsp)
+	h.Log.Infof("Request-ID: %s with body length %d byte and response body %s", resp.Header.Get("Api-Request-ID"), len(reqBody), dataRsp)
 
 	if isDrop, err := h.handleResponse(resp.StatusCode, dataRsp); err != nil {
 		if isDrop {
-			h.Log.Warnf("[vMonitor] Drop metrics because of %s", err.Error())
+			h.Log.Warnf("Drop metrics because of %s", err.Error())
 			return nil
 		}
 		return err
@@ -410,22 +402,22 @@ func (h *VNGCloudvMonitor) handleResponse(respCode int, dataRsp []byte) (bool, e
 	case 201:
 		return false, nil
 	case 401:
-		return true, fmt.Errorf("[vMonitor] IAM Unauthorized. Please check your service account")
+		return true, fmt.Errorf("IAM Unauthorized. Please check your service account")
 	case 403:
-		return true, fmt.Errorf("[vMonitor] IAM Forbidden. Please check your permission")
+		return true, fmt.Errorf("IAM Forbidden. Please check your permission")
 	case 428:
 		if isDrop, err := h.checkQuota(); err != nil {
-			return isDrop, fmt.Errorf("[vMonitor] Can not check quota: %s", err.Error())
+			return isDrop, fmt.Errorf("can not check quota: %s", err.Error())
 		}
 	case 409:
 		h.doubleCheckTime()
-		return true, fmt.Errorf("[vMonitor] Conflict. Please check your quota again")
+		return true, fmt.Errorf("CONFLICT. Please check your quota again")
 	}
-	return false, fmt.Errorf("[vMonitor] Status Code: %d, message: %s", respCode, dataRsp)
+	return false, fmt.Errorf("status Code: %d, message: %s", respCode, dataRsp)
 }
 
 func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
-	log.Printf("[vMonitor] Start check quota ...")
+	h.Log.Info("Start check quota ...")
 	h.checkQuotaFirst = true
 
 	quotaStruct := &QuotaInfo{
@@ -434,12 +426,12 @@ func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
 	}
 	quotaJson, err := json.Marshal(quotaStruct)
 	if err != nil {
-		return false, fmt.Errorf("[vMonitor] Can not marshal quota struct: %s", err.Error())
+		return false, fmt.Errorf("can not marshal quota struct: %s", err.Error())
 	}
 
 	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s%s", h.URL, quotaPath), bytes.NewBuffer(quotaJson))
 	if err != nil {
-		return false, fmt.Errorf("[vMonitor] Error create new request: %s", err.Error())
+		return false, fmt.Errorf("error create new request: %s", err.Error())
 	}
 	req.Header.Set("checksum", h.infoHost.HashID)
 	req.Header.Set("Content-Type", defaultContentType)
@@ -447,21 +439,21 @@ func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
 	resp, err := h.client_iam.Do(req)
 
 	if err != nil {
-		return false, fmt.Errorf("[vMonitor] Send request checking quota failed: (%s)", err.Error())
+		return false, fmt.Errorf("send request checking quota failed: (%s)", err.Error())
 	}
 	defer resp.Body.Close()
 	dataRsp, err := io.ReadAll(resp.Body)
 
 	if err != nil {
-		return false, fmt.Errorf("[vMonitor] Error occurred when reading response body: (%s)", err.Error())
+		return false, fmt.Errorf("error occurred when reading response body: (%s)", err.Error())
 	}
 
 	isDrop := false
 	// handle check quota
 	switch resp.StatusCode {
 	case 200:
-		h.Log.Infof("[vMonitor] Request-ID: %s. Checking quota success. Continue send metric.", resp.Header.Get("Api-Request-ID"))
-		h.dropCount = 0
+		h.Log.Infof("Request-ID: %s. Checking quota success. Continue send metric.", resp.Header.Get("Api-Request-ID"))
+		h.dropCount = 1
 		h.dropTime = time.Now()
 		h.checkQuotaFirst = false
 		return false, nil
@@ -472,7 +464,7 @@ func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
 		isDrop = true
 		h.doubleCheckTime()
 	}
-	return isDrop, fmt.Errorf("[vMonitor] Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
+	return isDrop, fmt.Errorf("Request-ID: %s. Checking quota fail (%d - %s)", resp.Header.Get("Api-Request-ID"), resp.StatusCode, dataRsp)
 }
 
 func init() {
@@ -500,22 +492,16 @@ func init() {
 			checkQuotaRetry: defaultConfig.checkQuotaRetry,
 			infoHost:        infoHosts,
 
-			dropCount: 0,
-			retryTime: 8,
-			dropTime:  time.Now(),
-
-			dropMode:        false,
+			dropCount:       1,
+			dropTime:        time.Now(),
 			checkQuotaFirst: false,
 		}
 	})
 }
 
 func (h *VNGCloudvMonitor) doubleCheckTime() {
-	if h.dropCount < h.retryTime {
-		h.dropCount++
-	} else {
-		h.dropCount = 1
+	if h.dropCount < retryTime {
+		h.dropCount = h.dropCount * 2
 	}
-	dropDuration := time.Duration(int(math.Pow(2, float64(h.dropCount))) * int(h.checkQuotaRetry))
-	h.dropTime = time.Now().Add(dropDuration)
+	h.dropTime = time.Now().Add(time.Duration(h.dropCount * int(time.Duration(h.checkQuotaRetry))))
 }

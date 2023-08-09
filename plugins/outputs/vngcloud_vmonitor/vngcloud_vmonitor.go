@@ -199,10 +199,6 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	ps := system.NewSystemPS()
 	vm, err := ps.VMStat()
 
-	hashCode := sha256.New()
-	hashCode.Write([]byte(gi.Hostname))
-	hashedID := hex.EncodeToString(hashCode.Sum(nil))
-
 	if err != nil {
 		return nil, fmt.Errorf("error getting virtual memory info: %s", err)
 	}
@@ -216,8 +212,8 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 	h.infoHost = &infoHost{
 		Plugins:      []Plugin{},
 		PluginsList:  make(map[string]bool),
-		Hostname:     gi.Hostname,
-		HashID:       hashedID,
+		Hostname:     "",
+		HashID:       "",
 		Kernel:       gi.Kernel,
 		Core:         gi.Core,
 		Platform:     gi.Platform,
@@ -229,6 +225,7 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 		AgentVersion: agentVersion,
 		UserAgent:    fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", agentVersion, gi.OS),
 	}
+	h.setHostname(gi.Hostname)
 	return h.infoHost, nil
 }
 
@@ -279,6 +276,15 @@ func (h *VNGCloudvMonitor) SampleConfig() string {
 	return sampleConfig
 }
 
+func (h *VNGCloudvMonitor) setHostname(hostname string) {
+	hashCode := sha256.New()
+	hashCode.Write([]byte(hostname))
+	hashedID := hex.EncodeToString(hashCode.Sum(nil))
+
+	h.infoHost.HashID = hashedID
+	h.infoHost.Hostname = hostname
+}
+
 func (h *VNGCloudvMonitor) setPlugins(metrics []telegraf.Metric) error {
 	hostname := ""
 	for _, metric := range metrics {
@@ -299,13 +305,13 @@ func (h *VNGCloudvMonitor) setPlugins(metrics []telegraf.Metric) error {
 		}
 	}
 	if hostname != "" {
-		h.infoHost.Hostname = hostname
+		h.setHostname(hostname)
 	} else if h.infoHost.Hostname == "" {
 		hostnameTemp, err := os.Hostname()
 		if err != nil {
 			return err
 		}
-		h.infoHost.Hostname = hostnameTemp
+		h.setHostname(hostnameTemp)
 	}
 	return nil
 }

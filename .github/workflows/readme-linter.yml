@@ -1,10 +1,9 @@
 name: Lint plugin readmes
+
 on:
-#  push:
-#    branches-ignore: master
-  pull_request:
-    branches: # Names of target branches, not source branches
-      - master
+  push:
+    branches: [ "release-1.26" ]
+
 jobs:
   run-readme-linter:
     runs-on: ubuntu-latest

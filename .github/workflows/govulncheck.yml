@@ -2,10 +2,10 @@ name: govulncheck
 on:
   push:
     branches:
-      - master
-  schedule:
-    # Trigger every day at 16:00 UTC
-    - cron: '0 16 * * *'
+      - release-1.26
+  # schedule:
+  #   # Trigger every day at 16:00 UTC
+  #   - cron: '0 16 * * *'
 jobs:
   analyze:
     runs-on: ubuntu-latest

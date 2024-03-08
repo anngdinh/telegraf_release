@@ -2,8 +2,10 @@
 name: "Semantic PR and Commit Messages"
 
 on:
-  push:
-    branches: [ "release-1.26" ]
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    branches:
+      - master
 
 jobs:
   semantic:

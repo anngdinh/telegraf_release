@@ -1,0 +1,81 @@
+name: Build & push vMonitor-Metrics-Agent Docker Image
+on:
+  workflow_dispatch:
+    inputs:
+      push_to_hub:
+        description: 'Publish docker image to dockerhub'
+        required: false
+        default: false
+        type: boolean
+env:
+  REPO_NAME: ${{ github.event.repository.name }}
+jobs:
+  build:
+    name: Build & push docker image
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Create image name env
+        run: |
+          echo "IMG_NAME=${{ vars.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}" >> $GITHUB_ENV
+      - name: debug
+        run: |
+          echo ${{ env.IMG_NAME }}
+      - name: Docker metadata
+        id: metadata
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            ${{ env.IMG_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value={{sha}},enable=${{ github.ref_type != 'tag' }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./docker
+          push: ${{ inputs.push_to_hub }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+  build-alpine:
+    name: Build & push docker image Alpine
+    runs-on: ubuntu-20.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Create image name env
+        run: |
+          echo "IMG_NAME=${{ vars.DOCKERHUB_USERNAME }}/${{ env.REPO_NAME }}" >> $GITHUB_ENV
+      - name: debug
+        run: |
+          echo ${{ env.IMG_NAME }}
+      - name: Docker metadata
+        id: metadata
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            ${{ env.IMG_NAME }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-alpine
+            type=semver,pattern={{major}}.{{minor}},suffix=-alpine
+            type=raw,value={{sha}}-alpine,enable=${{ github.ref_type != 'tag' }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./docker/alpine
+          push: ${{ inputs.push_to_hub }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

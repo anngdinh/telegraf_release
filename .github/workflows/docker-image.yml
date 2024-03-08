@@ -13,4 +13,12 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      run: docker build ./docker --file Dockerfile --tag my-image-name:$(date +%s)
+  
+  build-alpine:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build the Docker image Alpine
+      run: docker build ./docker/alpine --file Dockerfile --tag my-image-name-alpine:$(date +%s)

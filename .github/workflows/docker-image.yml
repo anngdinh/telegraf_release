@@ -21,4 +21,4 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build the Docker image Alpine
-      run: docker build -f ./docker/alpine/Dockerfile ./docker/alpine --file Dockerfile --tag my-image-name-alpine:$(date +%s)
+      run: docker build -f ./docker/alpine/Dockerfile ./docker/alpine --tag my-image-name-alpine:$(date +%s)

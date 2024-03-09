@@ -54,7 +54,7 @@ jobs:
         uses: github/super-linter@v4.9.2
         env:
           VALIDATE_ALL_CODEBASE: false
-          DEFAULT_BRANCH: master
+          DEFAULT_BRANCH: release-1.26
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           LINTER_RULES_PATH: '.'
           MARKDOWN_CONFIG_FILE: .markdownlint.yml

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -81,7 +80,7 @@ type infoHost struct {
 	CPUs         int    `json:"cpus"`
 	ModelNameCPU string `json:"model_name_cpu"`
 	Mem          uint64 `json:"mem"`
-	Ip           string `json:"ip"`
+	IP           string `json:"ip"`
 	AgentVersion string `json:"agent_version"`
 	UserAgent    string `toml:"user_agent"`
 }
@@ -95,12 +94,12 @@ type VNGCloudvMonitor struct {
 	Log telegraf.Logger `toml:"-"`
 
 	IamURL       string `toml:"iam_url"`
-	ClientId     string `toml:"client_id"`
+	ClientID     string `toml:"client_id"`
 	ClientSecret string `toml:"client_secret"`
 
 	serializer serializers.Serializer
 	infoHost   *infoHost
-	client_iam *http.Client
+	clientIam  *http.Client
 
 	checkQuotaRetry config.Duration
 	dropCount       int
@@ -114,8 +113,8 @@ func (h *VNGCloudvMonitor) SetSerializer(serializer serializers.Serializer) {
 
 func (h *VNGCloudvMonitor) initHTTPClient() error {
 	h.Log.Debug("Init client-iam ...")
-	Oauth2ClientConfig := &clientcredentials.Config{
-		ClientID:     h.ClientId,
+	oauth2ClientConfig := &clientcredentials.Config{
+		ClientID:     h.ClientID,
 		ClientSecret: h.ClientSecret,
 		TokenURL:     h.IamURL,
 	}
@@ -129,7 +128,7 @@ func (h *VNGCloudvMonitor) initHTTPClient() error {
 		},
 		Timeout: time.Duration(h.Timeout),
 	})
-	token, err := Oauth2ClientConfig.TokenSource(ctx).Token()
+	token, err := oauth2ClientConfig.TokenSource(ctx).Token()
 	if err != nil {
 		return fmt.Errorf("failed to get token: %s", err.Error())
 	}
@@ -138,7 +137,7 @@ func (h *VNGCloudvMonitor) initHTTPClient() error {
 	if err != nil {
 		return fmt.Errorf("failed to Marshal token: %s", err.Error())
 	}
-	h.client_iam = Oauth2ClientConfig.Client(ctx)
+	h.clientIam = oauth2ClientConfig.Client(ctx)
 	h.Log.Info("Init client-iam successfully !")
 	return nil
 }
@@ -221,7 +220,7 @@ func (h *VNGCloudvMonitor) getHostInfo() (*infoHost, error) {
 		CPUs:         gi.CPUs,
 		ModelNameCPU: modelNameCPU,
 		Mem:          vm.Total,
-		Ip:           ipLocal,
+		IP:           ipLocal,
 		AgentVersion: agentVersion,
 		UserAgent:    fmt.Sprintf("%s/%s (%s)", "vMonitorAgent", agentVersion, gi.OS),
 	}
@@ -251,7 +250,7 @@ func (h *VNGCloudvMonitor) Connect() error {
 	// h.client_iam = client_iam
 	err := h.initHTTPClient()
 	if err != nil {
-		log.Print(err)
+		h.Log.Info(err)
 		return err
 	}
 
@@ -272,7 +271,6 @@ func (h *VNGCloudvMonitor) Description() string {
 }
 
 func (h *VNGCloudvMonitor) SampleConfig() string {
-	//log.Print(sampleConfig)
 	return sampleConfig
 }
 
@@ -375,7 +373,7 @@ func (h *VNGCloudvMonitor) write(reqBody []byte) error {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
 
-	resp, err := h.client_iam.Do(req)
+	resp, err := h.clientIam.Do(req)
 	if err != nil {
 		if er := h.initHTTPClient(); er != nil {
 			h.Log.Warnf("Drop metrics because can't init IAM: %s", er.Error())
@@ -423,7 +421,7 @@ func (h *VNGCloudvMonitor) handleResponse(respCode int, dataRsp []byte) (bool, e
 }
 
 func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
-	h.Log.Info("Start check quota ...")
+	h.Log.Info("Start check quota .....")
 	h.checkQuotaFirst = true
 
 	quotaStruct := &QuotaInfo{
@@ -442,7 +440,7 @@ func (h *VNGCloudvMonitor) checkQuota() (bool, error) {
 	req.Header.Set("checksum", h.infoHost.HashID)
 	req.Header.Set("Content-Type", defaultContentType)
 	req.Header.Set("User-Agent", h.infoHost.UserAgent)
-	resp, err := h.client_iam.Do(req)
+	resp, err := h.clientIam.Do(req)
 
 	if err != nil {
 		return false, fmt.Errorf("send request checking quota failed: (%s)", err.Error())
@@ -490,7 +488,6 @@ func init() {
 			CPUs:        0,
 			Mem:         0,
 		}
-		log.Print("#################### Welcome to vMonitor (VNGCLOUD) ####################")
 		return &VNGCloudvMonitor{
 			Timeout:         defaultConfig.Timeout,
 			URL:             defaultConfig.URL,

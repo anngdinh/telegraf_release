@@ -12,9 +12,9 @@ on:
     tags:
       - v*
   pull_request:
-  # This creates an environment variable called `IMAGE_NAME ` with the value `ghtoken_product_demo`.
+  # This creates an environment variable called `IMAGE_NAME ` with the value `telegraf_release`.
 env:
-  IMAGE_NAME: ghtoken_product_demo
+  IMAGE_NAME: telegraf_release
 #
 jobs:
   # This pushes the image to GitHub Packages.
